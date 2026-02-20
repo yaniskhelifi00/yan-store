@@ -66,6 +66,6 @@ export const login = async (req, res) => {
     user: { id: user.id, name: user.name, email: user.email, role: user.role },
   });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    res.status(400).json({ error: "Error!" });
   }
 };
