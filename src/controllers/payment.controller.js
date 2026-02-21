@@ -82,9 +82,9 @@ export const captureOrder = async (req, res) => {
         `${PAYPAL_BASE}/v2/checkout/orders/${orderId}`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      console.log("Full order:", JSON.stringify(orderCheck.data, null, 2));
+      //console.log("Full order:", JSON.stringify(orderCheck.data, null, 2));
       orderStatus = orderCheck.data.status;
-      console.log(`Order status check ${i + 1}: ${orderStatus}`);
+      //console.log(`Order status check ${i + 1}: ${orderStatus}`);
 
       if (orderStatus === "APPROVED") break;
       if (orderStatus === "COMPLETED") {
@@ -117,7 +117,7 @@ export const captureOrder = async (req, res) => {
     );
 
     const capture = response.data;
-    console.log("Capture response:", capture.status);
+    //console.log("Capture response:", capture.status);
 
     if (capture.status !== "COMPLETED") {
       return res.json({ success: false, status: capture.status });
@@ -125,13 +125,13 @@ export const captureOrder = async (req, res) => {
 
     // Parse appId from custom_id ("userId:appId") or fallback to request body
     const customId = capture.purchase_units?.[0]?.custom_id ?? "";
-    console.log("custom_id received:", customId);
+    //console.log("custom_id received:", customId);
     let appId = parseInt(customId.split(":")[1]);
 
     // Fallback: client sends appId in body
     if (!appId && req.body?.appId) {
       appId = parseInt(req.body.appId);
-      console.log("Using appId from request body:", appId);
+      //console.log("Using appId from request body:", appId);
     }
 
     if (!appId) {
