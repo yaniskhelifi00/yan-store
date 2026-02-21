@@ -1,3 +1,5 @@
+// prisma/schema.prisma
+
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
@@ -8,40 +10,54 @@ generator client {
 }
 
 model User {
-  id          Int       @id @default(autoincrement())
-  name        String
-  email       String    @unique
-  password    String
-  role        String    @default("user") // user, developer, admin
-  createdAt   DateTime  @default(now())
-  apps        App[]     @relation("UserApps")
-  downloads   Download[]
+  id        Int        @id @default(autoincrement())
+  name      String
+  email     String     @unique
+  password  String
+  role      String     @default("user") // user, developer, admin
+  createdAt DateTime   @default(now())
+  apps      App[]      @relation("UserApps")
+  downloads Download[]
+  purchases Purchase[]
 }
 
 model App {
-  id          Int       @id @default(autoincrement())
+  id          Int        @id @default(autoincrement())
   title       String
   description String?
   category    String?
   apkUrl      String
   iconUrl     String?
   screenshots String[]
-  version     String    @default("1.0.0")
-  isFree      Boolean   @default(true)
-  price       Float     @default(0.0)
-  createdAt   DateTime  @default(now())
+  version     String     @default("1.0.0")
+  isFree      Boolean    @default(true)
+  price       Float      @default(0.0)
+  createdAt   DateTime   @default(now())
   developer   User?      @relation("UserApps", fields: [developerId], references: [id])
   developerId Int
   downloads   Download[]
+  purchases   Purchase[]
 }
 
 model Download {
-  id        Int      @id @default(autoincrement())
-  userId    Int
-  appId     Int
+  id           Int      @id @default(autoincrement())
+  userId       Int
+  appId        Int
   downloadedAt DateTime @default(now())
 
-  // Relations
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  app       App      @relation(fields: [appId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  app  App  @relation(fields: [appId], references: [id], onDelete: Cascade)
+}
+
+model Purchase {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+  appId       Int
+  purchasedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  app  App  @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  // One purchase record per user per app — prevents duplicates
+  @@unique([userId, appId])
 }
