@@ -7,7 +7,7 @@ const prisma = new PrismaClient();
 // Register
 export const register = async (req, res) => {
   try {
-    const { name, email, password, confirmPassword } = req.body;
+    const { name, email, password, confirmPassword, isDeveloper } = req.body;
 
     // ✅ Check required fields
     if (!name || !email || !password || !confirmPassword) {
@@ -19,7 +19,7 @@ export const register = async (req, res) => {
       return res.status(400).json({ error: "Passwords do not match" });
     }
 
-    //  Check if email already exists
+    // Check if email already exists
     const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) {
       return res.status(400).json({ error: "Email already in use" });
@@ -28,10 +28,13 @@ export const register = async (req, res) => {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
+    // Determine role from isDeveloper flag
+    const role = isDeveloper === true ? "developer" : "user";
+
     // Create user
     const user = await prisma.user.create({
-      data: { name, email, password: hashedPassword },
-      select: { id: true, name: true, email: true }, // return only safe fields
+      data: { name, email, password: hashedPassword, role },
+      select: { id: true, name: true, email: true, role: true },
     });
 
     res.status(201).json({ message: "User registered", user });

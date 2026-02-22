@@ -5,10 +5,9 @@ import { PrismaClient } from "@prisma/client";
 
 const prisma      = new PrismaClient();
 const PAYPAL_BASE = "https://api-m.sandbox.paypal.com";
-const SERVER_BASE = process.env.SERVER_BASE_URL; // e.g. "http://192.168.1.105:5000"
+const SERVER_BASE = process.env.SERVER_BASE_URL;
 
 // ─── Create Order ─────────────────────────────────────────────────────────────
-// Protected — req.user comes from authenticateToken middleware
 export const createOrder = async (req, res) => {
   try {
     const { amount, appId } = req.body;
@@ -38,16 +37,14 @@ export const createOrder = async (req, res) => {
         purchase_units: [
           {
             amount: { currency_code: "USD", value: parseFloat(amount).toFixed(2) },
-            // Encode userId + appId so we can recover them in the success route
-            // (PayPal redirect is a plain browser GET — no auth header available there)
             custom_id: `${userId}:${appId}`,
           },
         ],
         application_context: {
-          return_url: `${SERVER_BASE}/api/payments/success`,
-          cancel_url:  `${SERVER_BASE}/api/payments/cancel`,
-          user_action: "PAY_NOW",
-          brand_name:  "AppStore",
+          return_url:          `${SERVER_BASE}/api/payments/success`,
+          cancel_url:          `${SERVER_BASE}/api/payments/cancel`,
+          user_action:         "PAY_NOW",
+          brand_name:          "AppStore",
           shipping_preference: "NO_SHIPPING",
         },
       },
@@ -64,101 +61,135 @@ export const createOrder = async (req, res) => {
   }
 };
 
+// ─── Payment Success ──────────────────────────────────────────────────────────
+// PayPal redirects here after the user approves.
+// We capture + save the purchase here — the app just polls the DB afterwards.
+export const paymentSuccess = async (req, res) => {
+  try {
+    const { token: orderId } = req.query;
+    if (!orderId) return res.send(successHtml());
+
+    const accessToken = await getAccessToken();
+
+    // Get order details
+    const orderRes = await axios.get(
+      `${PAYPAL_BASE}/v2/checkout/orders/${orderId}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const order = orderRes.data;
+
+    // Already captured — nothing to do
+    if (order.status === "COMPLETED") {
+      console.log(`✅ Order ${orderId} already completed`);
+      return res.send(successHtml());
+    }
+
+    // Capture
+    await axios.post(
+      `${PAYPAL_BASE}/v2/checkout/orders/${orderId}/capture`,
+      {},
+      { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
+    );
+
+    // Save purchase using custom_id ("userId:appId")
+    const customId = order.purchase_units?.[0]?.custom_id ?? "";
+    const [userId, appId] = customId.split(":").map(Number);
+
+    if (userId && appId) {
+      await prisma.purchase.upsert({
+        where:  { userId_appId: { userId, appId } },
+        update: {},
+        create: { userId, appId },
+      });
+      console.log(`✅ Purchase saved: userId=${userId} appId=${appId}`);
+    } else {
+      console.warn("⚠️  Could not parse custom_id:", customId);
+    }
+
+    res.send(successHtml());
+  } catch (err) {
+    console.error("❌ paymentSuccess error:", err.response?.data || err.message);
+    // Show success page anyway — purchase likely went through
+    res.send(successHtml());
+  }
+};
+
 // ─── Capture Order ────────────────────────────────────────────────────────────
-// Protected — called by the mobile app after user closes the PayPal browser
+// Called by the mobile app after the browser closes.
+// The success page already captured — we just poll the DB until the record appears.
+// Fallback: if the success page failed for any reason, we capture directly.
 export const captureOrder = async (req, res) => {
   try {
     const { orderId } = req.params;
     const userId = req.user.id;
+    const appId  = parseInt(req.body.appId);
 
     if (!orderId) return res.status(400).json({ error: "Missing orderId" });
+    if (!appId)   return res.status(400).json({ error: "Missing appId" });
 
-    const token = await getAccessToken();
+    // Poll DB up to 10 times, every 2s = 20s max
+    for (let i = 1; i <= 10; i++) {
+      const purchase = await prisma.purchase.findUnique({
+        where: { userId_appId: { userId, appId } },
+      });
 
-    // Poll until order is APPROVED (max 10 seconds, check every 2s)
-    let orderStatus = null;
-    for (let i = 0; i < 5; i++) {
-      const orderCheck = await axios.get(
-        `${PAYPAL_BASE}/v2/checkout/orders/${orderId}`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      //console.log("Full order:", JSON.stringify(orderCheck.data, null, 2));
-      orderStatus = orderCheck.data.status;
-      //console.log(`Order status check ${i + 1}: ${orderStatus}`);
-
-      if (orderStatus === "APPROVED") break;
-      if (orderStatus === "COMPLETED") {
-        // Already captured (e.g. by success page) — just save purchase and return
-        const customId = orderCheck.data.purchase_units?.[0]?.custom_id ?? "";
-        const appId = parseInt(customId.split(":")[1]);
-        if (appId) {
-          await prisma.purchase.upsert({
-            where:  { userId_appId: { userId, appId } },
-            update: {},
-            create: { userId, appId },
-          });
-        }
-        return res.json({ success: true, status: "COMPLETED", appId });
+      if (purchase) {
+        console.log(`✅ Purchase confirmed on DB check ${i}`);
+        return res.json({ success: true, appId });
       }
 
-      // Wait 2 seconds before next check
+      console.log(`DB check ${i}: purchase not yet saved, waiting...`);
       await new Promise((r) => setTimeout(r, 2000));
     }
 
-    if (orderStatus !== "APPROVED") {
-      return res.json({ success: false, status: orderStatus ?? "ORDER_NOT_APPROVED" });
+    // Fallback: success page may have failed — try direct capture
+    console.warn("⚠️  Purchase not in DB after 20s, attempting direct capture...");
+    try {
+      const token = await getAccessToken();
+
+      const orderRes = await axios.get(
+        `${PAYPAL_BASE}/v2/checkout/orders/${orderId}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const status = orderRes.data.status;
+
+      if (status === "APPROVED") {
+        await axios.post(
+          `${PAYPAL_BASE}/v2/checkout/orders/${orderId}/capture`,
+          {},
+          { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
+        );
+        await prisma.purchase.upsert({
+          where:  { userId_appId: { userId, appId } },
+          update: {},
+          create: { userId, appId },
+        });
+        console.log(`✅ Fallback capture successful`);
+        return res.json({ success: true, appId });
+      }
+
+      if (status === "COMPLETED") {
+        // Was captured but DB save failed — save now
+        await prisma.purchase.upsert({
+          where:  { userId_appId: { userId, appId } },
+          update: {},
+          create: { userId, appId },
+        });
+        return res.json({ success: true, appId });
+      }
+
+      return res.status(400).json({ success: false, status: status ?? "ORDER_NOT_APPROVED" });
+    } catch (fallbackErr) {
+      console.error("❌ Fallback capture failed:", fallbackErr.response?.data || fallbackErr.message);
+      return res.status(400).json({ success: false, status: "ORDER_NOT_APPROVED" });
     }
-
-    // Now capture
-    const response = await axios.post(
-      `${PAYPAL_BASE}/v2/checkout/orders/${orderId}/capture`,
-      {},
-      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
-    );
-
-    const capture = response.data;
-    //console.log("Capture response:", capture.status);
-
-    if (capture.status !== "COMPLETED") {
-      return res.json({ success: false, status: capture.status });
-    }
-
-    // Parse appId from custom_id ("userId:appId") or fallback to request body
-    const customId = capture.purchase_units?.[0]?.custom_id ?? "";
-    //console.log("custom_id received:", customId);
-    let appId = parseInt(customId.split(":")[1]);
-
-    // Fallback: client sends appId in body
-    if (!appId && req.body?.appId) {
-      appId = parseInt(req.body.appId);
-      //console.log("Using appId from request body:", appId);
-    }
-
-    if (!appId) {
-      console.error("Could not parse appId from custom_id:", customId);
-      return res.status(500).json({ error: "Could not determine purchased app" });
-    }
-
-    // Save purchase
-    await prisma.purchase.upsert({
-      where:  { userId_appId: { userId, appId } },
-      update: {},
-      create: { userId, appId },
-    });
-
-    res.json({ success: true, status: capture.status, appId });
   } catch (err) {
-    const issue = err.response?.data?.details?.[0]?.issue;
-    if (issue === "ORDER_NOT_APPROVED") {
-      return res.json({ success: false, status: "ORDER_NOT_APPROVED" });
-    }
-    console.error("Capture Order Error:", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to capture order" });
+    console.error("❌ captureOrder error:", err.message);
+    res.status(500).json({ error: "Server error" });
   }
 };
 
 // ─── Check Purchase ───────────────────────────────────────────────────────────
-// Protected — called by AppDetailsScreen on load to show correct button state
 export const checkPurchase = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -175,20 +206,8 @@ export const checkPurchase = async (req, res) => {
   }
 };
 
-// ─── Success page ─────────────────────────────────────────────────────────────
-// Public — PayPal redirects here after payment. We also capture + save here
-// as a safety net in case the user closes the browser before the app calls /capture.
-export const paymentSuccess = async (req, res) => {
-  // Capture is handled by the mobile app calling POST /capture/:orderId
-  // This page is only shown to the user as confirmation — no capture here
-  res.send(successHtml());
-};
-
-// ─── Cancel page ──────────────────────────────────────────────────────────────
-// Public — PayPal redirects here if user cancels
-export const paymentCancel = (req, res) => {
-  res.send(cancelHtml());
-};
+// ─── Cancel ───────────────────────────────────────────────────────────────────
+export const paymentCancel = (req, res) => res.send(cancelHtml());
 
 // ─── HTML helpers ─────────────────────────────────────────────────────────────
 const baseStyle = `
