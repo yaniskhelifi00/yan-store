@@ -9,6 +9,7 @@ import authRoutes from "./routes/authRoutes.js";
 import testRoutes from "./routes/testRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
 import paymentRoutes from "./routes/payment.routes.js";
+import statRoutes from "./routes/statRoutes.js";
 
 dotenv.config();
 
@@ -26,6 +27,7 @@ app.use("/app", appRoutes);
 app.use("/auth", authRoutes);
 app.use("/test", testRoutes);
 app.use("/user", userRoutes);
+app.use("/dev",statRoutes);
 app.use("/apps", express.static(path.join(__dirname, "../public/apps")));
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 app.use("/api/payments", paymentRoutes);
