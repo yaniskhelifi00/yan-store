@@ -7,6 +7,24 @@ const prisma      = new PrismaClient();
 const PAYPAL_BASE = "https://api-m.sandbox.paypal.com";
 const SERVER_BASE = process.env.SERVER_BASE_URL;
 
+// ─── Helper: credit developer solde ──────────────────────────────────────────
+const creditDeveloper = async (appId) => {
+  const app = await prisma.app.findUnique({
+    where:  { id: appId },
+    select: { price: true, developerId: true },
+  });
+
+  if (app?.developerId && app?.price) {
+    await prisma.user.update({
+      where: { id: app.developerId },
+      data:  { solde: { increment: app.price } },
+    });
+    console.log(`💰 Solde credited: developerId=${app.developerId} amount=${app.price}`);
+  } else {
+    console.warn(`⚠️  Could not credit developer for appId=${appId}`);
+  }
+};
+
 // ─── Create Order ─────────────────────────────────────────────────────────────
 export const createOrder = async (req, res) => {
   try {
@@ -63,7 +81,7 @@ export const createOrder = async (req, res) => {
 
 // ─── Payment Success ──────────────────────────────────────────────────────────
 // PayPal redirects here after the user approves.
-// We capture + save the purchase here — the app just polls the DB afterwards.
+// We capture + save the purchase + credit developer here.
 export const paymentSuccess = async (req, res) => {
   try {
     const { token: orderId } = req.query;
@@ -96,12 +114,22 @@ export const paymentSuccess = async (req, res) => {
     const [userId, appId] = customId.split(":").map(Number);
 
     if (userId && appId) {
+      // Check if purchase already exists to avoid double-crediting developer
+      const existing = await prisma.purchase.findUnique({
+        where: { userId_appId: { userId, appId } },
+      });
+
       await prisma.purchase.upsert({
         where:  { userId_appId: { userId, appId } },
         update: {},
         create: { userId, appId },
       });
       console.log(`✅ Purchase saved: userId=${userId} appId=${appId}`);
+
+      // Only credit developer if this is a new purchase
+      if (!existing) {
+        await creditDeveloper(appId);
+      }
     } else {
       console.warn("⚠️  Could not parse custom_id:", customId);
     }
@@ -164,17 +192,24 @@ export const captureOrder = async (req, res) => {
           update: {},
           create: { userId, appId },
         });
+        await creditDeveloper(appId);
         console.log(`✅ Fallback capture successful`);
         return res.json({ success: true, appId });
       }
 
       if (status === "COMPLETED") {
-        // Was captured but DB save failed — save now
+        // Was captured but DB save failed — save now + credit developer
+        const existing = await prisma.purchase.findUnique({
+          where: { userId_appId: { userId, appId } },
+        });
         await prisma.purchase.upsert({
           where:  { userId_appId: { userId, appId } },
           update: {},
           create: { userId, appId },
         });
+        if (!existing) {
+          await creditDeveloper(appId);
+        }
         return res.json({ success: true, appId });
       }
 

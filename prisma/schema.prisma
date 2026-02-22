@@ -15,6 +15,7 @@ model User {
   email     String     @unique
   password  String
   role      String     @default("user") // user, developer, admin
+  solde     Float     @default(0.00)   
   createdAt DateTime   @default(now())
   apps      App[]      @relation("UserApps")
   downloads Download[]

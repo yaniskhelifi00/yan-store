@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "public"."User" ADD COLUMN     "solde" DOUBLE PRECISION NOT NULL DEFAULT 0.00;
